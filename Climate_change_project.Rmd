@@ -1,0 +1,376 @@
+---
+title: "Social Dynamics Lab: Climate change analysis"
+author: "Andrea Ambrosi & Francesca Andolfatto"
+date: "16 marzo 2020"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    number_sections: yes
+    theme: lumen
+    toc: yes
+---
+
+```{r,  message = FALSE, warning = FALSE}
+library(tm)
+library(caret)
+library(readr)
+library(dplyr)
+library(plotly)
+library(stringr)
+library(hashmap)
+library(ggplot2)
+library(syuzhet)
+library(quanteda)
+library(wordcloud)
+library(topicmodels)
+library(RColorBrewer)
+```
+
+# *Introduction*
+
+The dataset used is made up of 4.1 million URLs and online news page titles from around the world. There are 63 languages monitored by the GDELT 2015-2020 (one of the largest open databases created), and the selected articles contain the words / phrases "climate change", "global warming", "climate crisis", "greenhouse gas" , "greenhouse gas" or "carbon tax". Any mention of the above terms is sufficient for the item to be included in this list.
+Each annual file is made up of four columns, the first is the date on which GDELT saw the article in 'YYYYMMDDHHMMSS' format, the second is the language code, the third the page title and the fourth the URL.
+
+(From: https://blog.gdeltproject.org/a-new-multilingual-dataset-for-exploring-climate-change-narratives-4-1-million-news-urls-in-63-languages-2015-2020/)
+
+# *Data elaboration*
+At the beginning we take the data of all the datasets available to compose a complete dataset. Given that each dataset is quite heavy, after the construction of the fulldataset we remove all the others in order to keep clean the environment. We keep only the day, month and year of the date contained in the dataset even if we use almost only the year in the computation.
+```{r, message = FALSE, warning = FALSE}
+###DATA ELABORATION####
+WebNewsMultilingualURLs_2015 <- read_csv("./WebNewsMultilingualURLs.2015.csv")
+WebNewsMultilingualURLs_2015$Year <- c("2015")
+WebNewsMultilingualURLs_2016 <- read_csv("./WebNewsMultilingualURLs.2016.csv")
+WebNewsMultilingualURLs_2016$Year <- c("2016")
+WebNewsMultilingualURLs_2017 <- read_csv("./WebNewsMultilingualURLs.2017.csv")
+WebNewsMultilingualURLs_2017$Year <- c("2017")
+WebNewsMultilingualURLs_2018 <- read_csv("./WebNewsMultilingualURLs.2018.csv")
+WebNewsMultilingualURLs_2018$Year <- c("2018")
+WebNewsMultilingualURLs_2019 <- read_csv("./WebNewsMultilingualURLs.2019.csv")
+WebNewsMultilingualURLs_2019$Year <- c("2019")
+WebNewsMultilingualURLs_2020 <- read_csv("./WebNewsMultilingualURLs.2020.csv")
+WebNewsMultilingualURLs_2020$Year <- c("2020")
+
+data <- as.data.frame(rbind(WebNewsMultilingualURLs_2015, WebNewsMultilingualURLs_2016,
+                            WebNewsMultilingualURLs_2017, WebNewsMultilingualURLs_2018,
+                            WebNewsMultilingualURLs_2019, WebNewsMultilingualURLs_2020))
+
+# The datasets are very heavy so it is better to keep clean the workspace
+rm(WebNewsMultilingualURLs_2015, WebNewsMultilingualURLs_2016, WebNewsMultilingualURLs_2017,
+   WebNewsMultilingualURLs_2018, WebNewsMultilingualURLs_2019, WebNewsMultilingualURLs_2020)
+sort(table(data$Lang=="eng"))
+# We take only the part of the date that interests us: year, month, day
+data$Date <- as.Date(substr(as.character(data$Date), 0, 8), format = c("%Y%m%d"))
+```
+
+From the URL of the site that publishes the news we extract the host through regular expression like in the example below:
+```{r}
+# Host extraction from URL using regular expression
+data$Host <- str_extract(data$URL, regex("(HTTPS*|(H|h)ttps*)://[a-zA-Z0-9\\.\\_\\-]+")) 
+#data$URL[is.na(data$Host)] # check for NA --> Host that has not been extracted from URL
+paste("URL :", data$URL[1])
+paste("Host:", data$Host[1])
+```
+
+We load a table of TLD (Top-level domain) to be able to cross the data with the domains of the Hosts in order to understand which country they come from. We use the hashmap to speed up the search process.
+```{r, message = FALSE, warning = FALSE}
+# Top Level Domain - table containing the TLDs of each country
+# (therefore not including the .com .org etc.)
+tld <- read.csv("tld.csv")
+
+# We use a hashmap because it allows to quickly have the nation corresponding to the given domain.
+(tld.hash <- hashmap(as.character(tld$Name), as.character(tld$Entity)))
+```
+
+Again we use a regexp to extract the domain from the host. We repeat the procedure for 5 subsets of the whole dataset because R in some cases cannot handle the processing of too much data all together. Then we take the domain from the host and look for relative country in the TLD table.
+```{r}
+# Pattern for next domain extractions
+pattern <- "[a-zA-Z0-9]+$"
+
+# We divide into 5 blocks of 1M each by selecting a single column of the initial dataset.
+# If we had worked with the entire dataset R would have crashed.
+
+r         <- NULL
+r$Host    <- data$Host[c(1:1000000)]
+r$Domain  <- rep("", length(r$Host))
+r$Country <- rep("", length(r$Host))
+for(i in 1:length(r$Host)){
+  r$Domain[i]  <- paste(".",    as.character(str_extract(r$Host[i], pattern)), sep = "")
+  r$Country[i] <- tld.hash$find(as.character(r$Domain[i]))
+}
+reduced <- as.data.frame(cbind(r$Host, r$Domain, r$Country))
+rm(r)
+
+r1         <- NULL
+r1$Host    <- data$Host[c(1000001:2000000)]
+r1$Domain  <- rep("", length(r1$Host))
+r1$Country <- rep("", length(r1$Host))
+for(i in 1:length(r1$Host)){
+  r1$Domain[i]  <- paste(".", str_extract(r1$Host[i], pattern), sep = "")
+  r1$Country[i] <- tld.hash$find(as.character(r1$Domain[i]))
+}
+reduced <- rbind(reduced, cbind(r1$Host, r1$Domain, r1$Country))
+rm(r1)
+
+r2         <- NULL
+r2$Host    <- data$Host[c(2000001:3000000)]
+r2$Domain  <- rep("", length(r2$Host))
+r2$Country <- rep("", length(r2$Host))
+for(i in 1:length(r2$Host)){
+  r2$Domain[i]  <- paste(".", str_extract(r2$Host[i], pattern), sep = "")
+  r2$Country[i] <- tld.hash$find(as.character(r2$Domain[i]))
+}
+reduced <- rbind(reduced, cbind(r2$Host, r2$Domain, r2$Country))
+rm(r2)
+
+r3         <- NULL
+r3$Host    <- data$Host[c(3000001:4000000)]
+r3$Domain  <- rep("", length(r3$Host))
+r3$Country <- rep("", length(r3$Host))
+for(i in 1:length(r3$Host)){
+  r3$Domain[i]  <- paste(".", str_extract(r3$Host[i], pattern), sep = "")
+  r3$Country[i] <- tld.hash$find(as.character(r3$Domain[i]))
+}
+reduced <- rbind(reduced, cbind(r3$Host, r3$Domain, r3$Country))
+rm(r3)
+
+r4         <- NULL
+r4$Host    <- data$Host[c(4000001:length(data$Host))]
+r4$Domain  <- rep("", length(r4$Host))
+r4$Country <- rep("", length(r4$Host))
+for(i in 1:length(r4$Host)){
+  r4$Domain[i]  <- paste(".", str_extract(r4$Host[i], pattern), sep = "")
+  r4$Country[i] <- tld.hash$find(as.character(r4$Domain[i]))
+}
+reduced <- rbind(reduced, cbind(r4$Host, r4$Domain, r4$Country))
+rm(r4)
+
+names(reduced) <- c("Host", "Domain", "Country")
+```
+
+After having recomposed the table, few corrections are necessary because some domains belong to linguistic minorities of some countries (ex: ".gal" for Galicia) or give problems for case sensitive (ex: ".CZ") or they are city domains (ex: ".paris" for Paris or ".ist" for Istambul).
+```{r}
+# Corrections:
+reduced$Country[reduced$Domain == ".cat"    ] <- "Spain"          # Catalonia
+reduced$Country[reduced$Domain == ".eus"    ] <- "Spain"          # Basque language
+reduced$Country[reduced$Domain == ".gal"    ] <- "Spain"          # Galician language
+reduced$Country[reduced$Domain == ".bzh"    ] <- "France"         # Breton culture and languages
+reduced$Country[reduced$Domain == ".corsica"] <- "France"         # Corsica language
+reduced$Country[reduced$Domain == ".paris"  ] <- "France"         
+reduced$Country[reduced$Domain == ".alsace" ] <- "France"         # Alsace language
+reduced$Country[reduced$Domain == ".wien"   ] <- "Austria"        # Wien
+reduced$Country[reduced$Domain == ".swiss"  ] <- "Switzerland"    # Switzerland
+reduced$Country[reduced$Domain == ".ist"    ] <- "Turkey"         # Istanbul
+reduced$Country[reduced$Domain == ".CZ"     ] <- "Czech Republic" 
+reduced$Country[reduced$Domain == ".gent"   ] <- "Belgium"        
+
+# Original dataset update
+data$Domain  <- reduced$Domain
+data$Country <- reduced$Country
+```
+
+# *Analysis*
+
+The impact of the previous choice to get the country from the domain turns out to be risky under some points of view. It can be seen that 33% of the records within the dataset are excluded with this choice as they derive from the domains like ".com", ".net", ".info", ".org", ".edu" etc. Another point against this method derives from a deviation in the interpretation of the data since from this definition it would appear that the United States publishes very little news about climate change. This information is partially influenced by the fact that in the United States the ".us" domain is not particularly used preferring the ".com" even if this (at least initially) was reserved for commercial purposes only.
+```{r}
+# 33% of articles do not have a country-specific TLD
+(length(reduced$Country[is.na(reduced$Country)]) / nrow(data)) * 100 
+# They are mostly .com, .net, .org and .info websites
+tail(sort(table(reduced$Domain[is.na(reduced$Country)])), 10)
+```
+
+From this processing and aware of the limits of the model used, we can still draw some interpretations of the data.
+These are for example the 10 countries that have the large number of hosts:
+```{r}
+# Top 10 countries by number of hosts
+#ggsave("top_10_countries_host.png", plot = plot, dpi = 500, limitsize = FALSE, units = c("mm"))
+s <- as.data.frame(tail(sort(table(unique(reduced)$Country)), 10))
+s$Var1 <- factor(s$Var1, levels = rev(levels(s$Var1)))
+ggplot(s, aes(x = Var1, y = Freq, fill = Var1)) + 
+	geom_col() + 
+	labs(title = "Top 10 countries by number of hosts",
+		fill = "Country:"
+		) + 
+	ylab("Total Count") + 
+	xlab(NULL) +
+	scale_fill_brewer(palette = "BrBG") + theme(axis.text.x = element_blank())
+plot
+```
+
+These instead the 10 countries for number of published articles:
+```{r}
+# Top 10 country by number of written articles (considering the domain)
+top.ten.by.articles <- as.data.frame(tail(sort(table(reduced$Country)), 10)) 
+top.ten.by.articles
+names(top.ten.by.articles) <- c("Country", "Count")
+rm(reduced)
+```
+
+The 10 hosts that publish the large number of articles:
+```{r}
+
+s <- as.data.frame(tail(sort(table(data$Host)), 10))
+s$Var1 <- factor(s$Var1, levels = rev(levels(s$Var1)))
+plot <- ggplot(s, aes(x = Var1, y = Freq, fill = Var1)) + 
+	geom_col() + 
+	labs(title = "Top 10 hosts",
+		fill = "Host:"
+		) + 
+	ylab("Total Count") + 
+	xlab(NULL) +
+	scale_fill_brewer(palette = "BrBG") + theme(axis.text.x = element_blank())
+#ggsave("top_10_host.png", plot = plot, dpi = 500, limitsize = FALSE, units = c("cm"))
+```
+
+The 10 most spoken languages:
+```{r}
+#barplot(, col = brewer.pal(10, "BrBG"), ylab = "Total Count", 
+#		main = "Top 10 ", las = 2, yaxt = "n")
+
+s <- as.data.frame(tail(sort(table(data$Lang)), 10))
+s$Var1 <- factor(s$Var1, levels = rev(levels(s$Var1)))
+plot <- ggplot(s, aes(x = Var1, y = Freq, fill = Var1)) + 
+	geom_col() + 
+	labs(title = "Top 10 most spoken languages",
+		fill = "Language:"
+		) + 
+	ylab("Total Count") + 
+	xlab(NULL) +
+	scale_fill_brewer(palette = "BrBG") + theme(axis.text.x = element_blank())
+#ggsave("top_10_lang.png", plot = plot, dpi = 500, limitsize = FALSE, units = c("cm"))
+```
+
+Trying to compare the top 10 countries that publish the large number of articles, we find Germany in first place, followed by Italy in second place. We see in the graph the trend of the articles published per day in these two countries compared with the average of the top 10 countries.
+```{r}
+group <- as.data.frame(data[!is.na(data$Country) & data$Country %in% top.ten.by.articles$Country, ] %>% 
+                           group_by(Year, Country) %>% 
+                           summarise(Count = n()))
+
+group.extra <- group[group$Country == "Italy" | group$Country == "Germany", ]
+names(group.extra) <- c("Year", "Group", "Count")
+
+mean.vs.IT        <- as.data.frame(group %>% group_by(Year) %>% summarise(Count = mean(Count)))
+mean.vs.IT$Group  <- rep("Top 10 mean", nrow(mean.vs.IT))
+mean.vs.IT        <- rbind(mean.vs.IT, group.extra)
+
+rm(group, group.extra)
+
+# This way we store the average of articles per day for each year to don't waste the information of 2020
+for (i in 1:nrow(mean.vs.IT)){
+  if(mean.vs.IT$Year[i] != 2020){
+    mean.vs.IT$Count[i] <- mean.vs.IT$Count[i] / 365
+  }
+  else{
+    #We have only the first 25 days of 2020
+    mean.vs.IT$Count[i] <- mean.vs.IT$Count[i] / 25
+  }
+}
+
+# Global trend over the years vs. Italian language trend over the years
+plot <- ggplot(mean.vs.IT,  aes(x = Year, y = Count, color = Group)) +
+  geom_line(aes(x = Year, y = Count, group = Group)) +
+  geom_point() +
+  labs(
+    title    = "Top 10 average vs. Italy",
+    subtitle = "Germany is first in the class but Italy (in second place) keeps a good trend over the mean.",
+    caption  = "Country extracted using URL domains",
+    colour   = "Country",
+    x        = "Year" ,
+    y        = "Articles per day"
+  )
+#ggsave("top_10_vs_it.png", plot = plot, dpi = 500, limitsize = FALSE, units = c("cm"))
+rm(mean.vs.IT)
+```
+
+To have a better overview on the situation worldwide we produced this plot using the number of articles computed with the assumption we made above:
+
+![Climate change news distribution around the world.](./world_news_distribution.png)
+
+Let's move on to the analysis of the contents of the titles. In this case we use all the articles in Italian without looking at the domain they come from.
+```{r}
+titles <- removeWords(data$Title[data$Lang == "ita"],
+                      tm::stopwords("italian"))      # Remove useless words from Italian titles
+corpus <- VCorpus(VectorSource(titles))     
+# Set all to lowercase
+docs   <- tm_map(corpus, content_transformer(tolower))
+# Remove punctuations
+docs   <- tm_map(docs  , removePunctuation)
+# Eliminate extra white spaces
+docs   <- tm_map(docs  , stripWhitespace)
+# Text stemming
+docs   <- tm_map(docs  , stemDocument)
+
+rm(corpus)
+```
+
+Here is the wordcloud created with words that have appeared at least than 2000 times: they are shown in decreasing order of frequency based on the numerosity of the word.
+```{r}
+
+wordcloud(docs, max.words = 100 , min.freq = 2000  , scale  = c(4, .5), random.order = FALSE, 
+          random.color    = TRUE, rot.per  = .15, colors = brewer.pal(8, "BrBG"))
+
+```
+
+Let's proceed with the analysis of the sentiment: also in this case we decided to divide the calculation both to reduce the workload that R must sustain and to produce the analysis for each of the 6 years we have available. To better understand how it went during these years we decided to use the percentage of sentiment so different years can be compared even if there is a difference in the number of written articles.
+```{r}
+# Sentiment graph
+d_char <- as.data.frame(titles)
+rm(titles)
+d_char <- cbind(d_char, data$Year[data$Lang == "ita"])
+names(d_char) <- c("Title", "Year")
+d_char$Title <- as.character(d_char$Title)
+rm(data)
+
+sentiment_15 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2015],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2015]))[ , c(2:11)]))
+sentiment_15$Year <- 2015
+sentiment_16 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2016],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2016]))[ , c(2:11)]))
+sentiment_16$Year <- 2016
+sentiment_17 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2017],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2017]))[ , c(2:11)]))
+sentiment_17$Year <- 2017
+```
+```{r}
+sentiment_18 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2018],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2018]))[ , c(2:11)]))
+sentiment_18$Year <- 2018
+sentiment_19 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2019],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2019]))[ , c(2:11)]))
+sentiment_19$Year <- 2019
+sentiment_20 <- data.frame(colSums(cbind(d_char$Title[d_char$Year == 2020],
+										 get_nrc_sentiment(d_char$Title[d_char$Year == 2020]))[ , c(2:11)]))
+sentiment_20$Year <- 2020
+
+names(sentiment_15) <- names(sentiment_16) <- names(sentiment_17) <- names(sentiment_18) <- names(sentiment_19) <- names(sentiment_20) <- c("Count", "Year")
+
+TotalSentiment <- rbind(sentiment_15, sentiment_16, sentiment_17,
+						sentiment_18, sentiment_19, sentiment_20)
+TotalSentiment$Sentiment <- rownames(sentiment_15)
+rownames(TotalSentiment) <- NULL
+rm(sentiment_15, sentiment_16, sentiment_17, sentiment_18, sentiment_19, sentiment_20)
+
+tot <- as.data.frame(TotalSentiment %>% group_by(Year) %>% summarise(Tot = sum(Count)))
+for(i in 1:nrow(TotalSentiment)){
+	for(year in tot$Year){
+		if (year == TotalSentiment$Year[i]){
+			TotalSentiment$Count[i] <- (TotalSentiment$Count[i] / tot$Tot[tot$Year == year]) * 100
+		}
+	}
+}
+TotalSentiment$Count <- round(TotalSentiment$Count)
+
+plot_ly(
+  	data  = TotalSentiment,
+    x     = ~Sentiment,
+    y     = ~Count,
+    frame = ~Year,
+    type  = 'bar',
+    color = ~Sentiment) %>%
+  layout(title = 'Distribution of sentiment (from 2015 to 2020)',
+         xaxis = list(title = "Year"), 
+         yaxis = list(title = "Percentage of sentiment"),
+  	   	 showlegend = FALSE)
+
+table(data)
+```
